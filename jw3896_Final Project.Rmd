@@ -1,0 +1,1315 @@
+---
+title: "One Model or Many?"
+author: "Jiaxuan Wang, jw3896"
+date: "2020-8-16"
+output: html_document
+---
+
+```{r setup, echo = FALSE, message = FALSE, warning = FALSE,include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, comment="", warning = FALSE, message = FALSE, tidy.opts=list(width.cutoff=55))
+```
+
+```{r libraries,echo = FALSE, message = FALSE, warning = FALSE,include=FALSE}
+library(data.table)
+library(DT)
+library(ggplot2)
+#Install class package
+
+
+
+# Load class package
+library(class)
+library(rpart)
+#install.packages('e1071') 
+library(e1071) 
+
+
+library(ROCR)
+library(caTools)
+
+
+library(dplyr)
+#dummy variable
+library('fastDummies')
+#random forest
+library(ranger)
+library(randomForest)
+#boost
+library(gbm)
+#rename data.table
+library(tidyverse)
+#library(mice)
+library(caret)
+library(class)
+```
+
+&nbsp;
+&nbsp;
+&nbsp;
+
+## Introduction
+
+&nbsp;
+&nbsp;
+
+The dataset we use includes information about more than 130,000 Intensive Care Unit (ICU) visits, we clean the data before applying supervised machine learning models. When preparing data, we also use the adversarial validation to select/remove features. 
+
+Large data sets can include a variety of subgroups, the qualities of these subgroups may be quite different from each other.Each subgroup may have a different relationship between the outcome and the predictors in a supervised learning model.s. To build a model to predict patient survival given the ICU visit information in the given data, we choose two different approaches to get the best prediction.
+
+  • One Model: All of the subgroups are aggregated into a single data set that is used to inform the 
+    construction of a single model.
+    
+  • Many Models: A separate model is constructed for each subgroup based upon the corresponding subset 
+    of the overall data.
+    
+I chose five classification models to fit a variety of machine learning procedures,which are logistic regression, classification tree, random forest, knn, and gradient boosting. The accuracy of each models would be listed in the scoreboard with descending order. Then it's time to answer the question of whether to use one model or many models by analyzing the results. Each models and each modeling strategies have different pros and cons, conclusions related to which model and approach generates the best prediction, which model and approach is the best in different situations would also be delivered on basis of modeling results. 
+
+
+
+&nbsp;
+&nbsp;
+&nbsp;
+
+## Data Preparation
+
+&nbsp;
+
+```{r load data, message=FALSE, warning=FALSE}
+#load the data and take look 
+data<-fread(input="training_v2.csv")
+#head(data)
+#summary(data)
+```
+&nbsp;
+&nbsp;
+
+#### STEP 1
+
+1. After loading the data, rename the dependent variable to make it look more clear.
+
+2. To be prepared for applying the many models strategy to different age groups later, we need to omit those observations with missing age values from the data.
+
+3. Transform one of the independent variable "gender" to binary data with the ifelse() function; 
+   + This step would help avoid training/testing datasets from generating missing values  
+   + In order to reduce the number of newly generated variables in the model, I didn't generate dummy variables with the "gender" variable.
+
+```{r omit age na, message = FALSE, warning = FALSE}
+#replace the column "death" with “survival" 
+names(data)[names(data) == "hospital_death"] <- "survival"
+#omit all the "na" in "age" column
+data0<-na.omit(data,cols="age")
+#transform to binary
+data0$gender=ifelse(data0$gender =='M',1,0) 
+```
+
+&nbsp;
+&nbsp;
+
+#### STEP 2
+
+1. Use nrow() function to calculate the number of rows in in the data. 
+
+2. Mutate the table with dplyr functions: 
+   + Select all the columns in data0;
+   + Aggregate all the missing values in each column with sum(is.na()) function to get the total number of missing values for each column;
+   + Devide the total values by the number of rows in data0;
+   + Summarize the ratio of missing values in each columns.
+   
+3. Subset the data0 by selecting and drop those columns with missing value ratio > 0.2 
+
+```{r drop columns with too many na,message = FALSE, warning = FALSE}
+# number of rows in data0 
+#nrow(data0)
+# mutate the data to calculate the ratio of missing values in each columns
+dat<-data0 %>%
+  select(everything()) %>%  
+  summarise_all(funs(sum(is.na(.))/nrow(data0))) 
+
+# delete columns with missing value ratio > 0.2 
+data0<-subset(data0, select=-c(19,24,25,26,27,34,37,38,39,40,42,44,46,47,48,55,56,65,66,73,74,81,
+                               82,91,92,97,98,99,100,101,102,117,118,119,120,129,130,131,132,133,
+                               134,135,136,137,138,139,140,141,142,143,144,145,146,147,148,149,150,
+                               151,152,153,154:159,160:163,164:174))
+```
+
+
+&nbsp;
+&nbsp;
+
+#### STEP 3
+
+1. Drop all the "id" columns (encounter_id, patient_id, hospital_id, icu_id) from the data (they are unique in training data and testing data).
+
+2. Drop "hospital_admit_source", "icu_admit_source", "icu_stay_type" , these variables are not closely related with the hospital death.
+
+3. Convert variable "bmi" from string type to numeric type.
+   + Avoid generating NAN values when normalize data.
+   + Numeric and binary predictors fit the model.
+   + Nonnumeric characters caused R to read in these columns as character valued (strings) rather than numbers, so we need to check this.
+
+```{r drop ids clean_data, message = FALSE, warning = FALSE}
+#drop columns 
+data0<-subset(data0, select=-c(1,2,3,11,12,14,13))
+#convert strings in the column to numeric 
+data0$bmi<-as.numeric(data0$bmi)
+data0$apache_3j_diagnosis<-as.numeric(data0$apache_3j_diagnosis)
+class(data0$bmi)
+class(data0$apache_3j_diagnosis)
+```
+
+&nbsp;
+&nbsp;
+
+#### STEP 4
+
+1. Use the dummy_cols() method to make dummy variables from more than one column, and delete original columns;
+   + Automatically create dummy variables for all categorical predictors.
+
+```{r dummy variables clean_data, message = FALSE, warning = FALSE}
+# create dummy variables with fastDummie package 
+data_dummy <- dummy_cols(data0, select_columns = c('ethnicity',"icu_type", "apache_3j_bodysystem",
+                                                   "apache_2_bodysystem"),remove_selected_columns = TRUE)
+```
+
+&nbsp;
+&nbsp;
+
+#### STEP 5
+
+1. Define an f function to impute NA values with median of the column.
+   + Using the mice package is also a good method to clean the missing values but it would be very slow if there are too many columns in the data.
+   
+```{r impute impute na , message = FALSE, warning = FALSE}
+#test if all the na in age is omitted
+#data0 = mice::complete(mice(data0))
+#head(data0[,1:4])
+#is.data.table(data_dum)
+#data_dum
+f=function(x){
+   x<-as.numeric(as.character(x)) #first convert each column into numeric if it is from factor
+   x[is.na(x)] =median(x, na.rm=TRUE) #convert the item with NA to median value from the column
+   x #display the column
+}
+data9=data.frame(apply(data_dummy,2,f))
+```
+
+&nbsp;
+&nbsp;
+&nbsp;
+&nbsp;
+
+### Split the data 
+
+&nbsp;
+&nbsp;
+
+#### STEP 1
+
+1. Set seed to 35 and convert the data frame to data table
+   + We can get reproducible results by fixing the random number generator’s seed before applying models.
+   + The pretend random number generator generates a sequence of numbers that are random enough for most applications.
+   + The data table would be ready to subgroup by age.
+   
+2. Use createDataPartition function from the Caret package to stratify the data by age when splitting the data,
+   + This practice makes sure that observations in the training data and the testing data are randomly distributed in each age groups.
+   + A model trained on a vastly different data distribution than the test set will perform inferiorly at validation.
+   + Stratification makes sure we have identical distributions in the training/testing datasets and helps avoid problems of validation against an skewed test set. 
+   
+3. Split the train/test data sets with 0.8, extracting 80% of the observations to training set, and the rest of the observations are saved as testing set.  
+   
+```{r split data 1, message = FALSE, warning = FALSE,}
+#randomly split data for one model approach
+#split = sample(1:nrow(data9),0.8*nrow(data9))
+set.seed(35)
+
+#set data table for data9
+setDT(data9)
+#test if it is data table 
+is.data.table(data9)
+
+split=createDataPartition(data9$age,p=0.8,list=FALSE)
+
+training = data9[split,]
+testing = data9[-split,]
+```
+
+&nbsp;
+&nbsp;
+
+#### STEP 2
+
+1. Subgroup the training set and the testing set with 5 age ranges with data.table 
+
+2. Exclude age from the predictors in subgroups of the many model approach.
+   + This would ensure that the comparison between one model and many models are fair.
+
+```{r split data 2,message = FALSE, warning = FALSE}
+#split training data by groups 
+training.1<-training[age>0 & age<50,]
+training.2<-training[age>=50 & age<60,]
+training.3<-training[age>=60 & age<70,]
+training.4<-training[age>=70 & age<80,]
+training.5<-training[age>=80 & age<100,]
+
+#split testing data by groups 
+testing.1<-testing[age>0 & age<50,]
+testing.2<-testing[age>=50 & age<60,]
+testing.3<-testing[age>=60 & age<70,]
+testing.4<-testing[age>=70 & age<80,]
+testing.5<-testing[age>=80 & age<100,]
+
+# drop age function to iterate subgroups 
+#drop_age<-function (x){
+#   x<- select(x,-c("age"))
+#   }
+#drop_age (training.1)
+#drop_age (training.2)
+#drop_age (training.3)
+#drop_age (training.4)
+#drop_age (training.5)
+#drop_age (testing.1)
+#drop_age (testing.2)
+#drop_age (testing.3)
+#drop_age (testing.4)
+#drop_age (testing.5)
+# this function is able to run output for the first time, 
+#but not working if running the chunks repeatedly.
+
+#subset subgroups of training data 
+training.1<-select(testing.1,-c("age"))
+training.2<-select(testing.2,-c("age"))
+training.3<-select(testing.3,-c("age"))
+training.4<-select(testing.4,-c("age"))
+training.5<-select(testing.5,-c("age"))
+#subset subgroups of testing data 
+testing.1<-select(testing.1,-c("age"))
+testing.2<-select(testing.2,-c("age"))
+testing.3<-select(testing.3,-c("age"))
+testing.4<-select(testing.4,-c("age"))
+testing.5<-select(testing.5,-c("age"))
+
+```
+
+&nbsp;
+&nbsp;
+&nbsp;
+&nbsp;
+&nbsp;
+
+
+## Adversarial Validation
+
+&nbsp;
+&nbsp;
+
+1. Add pseudo label 0-1 to the training and testing sets.
+
+2. Set seed and shuffle the data to make the labels randomly distributed in the combined data set.
+   + This step prepares for splitting datasets, which avoid generating imbalanced training and testing sets.
+
+3. Apply a logistic regression model and predict the AUC score. 
+   + The AUC score is 0.5, which is within a reasonable range, which means all the predictors have a reasonable cardinality.
+
+```{r Adversarial Validation,message = FALSE, warning = FALSE}
+
+#pseudo-label 
+training[, ("target") := 1]
+testing[,("target"):=0]
+target.dat<-rbind(training,testing)
+
+#shuffle the data
+set.seed(42)
+rows <- sample(nrow(target.dat))
+target.dat <- target.dat[rows, ]
+
+#split new train and test data
+split = sample(1:nrow(target.dat),0.8*nrow(target.dat))
+train=target.dat[split,]
+test=target.dat[-split,]
+
+#apply model 
+model_adv = glm(target~.,data=train,family='binomial')
+
+#predict 
+pred = predict(model_adv,newdata=test,type='response')
+ROCRpred = prediction(pred,test$target)
+
+# auc measure
+round(as.numeric(performance(ROCRpred,"auc")@y.values) ,digits=1)
+
+```
+&nbsp;
+&nbsp;
+&nbsp;
+
+## Models {.tabset}
+
+### Category 1:  Logistic Regression {.tabset}
+
+#### One Model
+&nbsp;
+&nbsp;
+&nbsp;
+
+
+Logistic regression is the appropriate regression analysis to conduct when the dependent variable is dichotomous (binary).  Like all regression analyses, the logistic regression is a predictive analysis.  Logistic regression is used to describe data and to explain the relationship between one dependent binary variable and one or more nominal, ordinal, interval or ratio-level independent variables.\
+
+&nbsp;
+
+1. Use glm function to predict the logistic regression model 
+
+   + The probability distribution that is most often used when there are two classes is the binomial distribution.
+   
+   + Normally, the probability of the event is required to be between 0 and 1,if p is the probability of an event, the odds of the event are then p/(1 − p),
+     logistic regression models the log odds of the event as a linear function, logistic regression could also use nonlinear functions to 
+     constrains the probability estimates to between 0 and 1, produce linear class boundaries. Sometimes the boundaries are not linear because the predictors used in 
+     the model are non linear.
+     
+   + When relate models to the parameter of the binomial distribution, it's reasonable to compute a value of the likelihood function, and the β values that appear 
+     to maximize the likelihood for the data would be used to predict.
+
+2. Predict on the testing data set 
+
+   + glm does not predict the survive, but can produce the probability of the event by setting type = "response".
+   
+   + Binarize the predicted probability values to get the actual predictions with ifelse() function. 
+
+3. Compare the predictions generated from the logistic regression model with the testing data set.
+
+   + the accuracy would be the proportion of number of observations which predicting outputs equal to the actual values among all the testing data set.
+   
+4. The summary below shows the p-values for the nonlinear components, if the p-values are small, this indicates that the nonlinear relationships
+   between the survive and these predictors should be used, according to my observation, features that are linearly separable have lower p-values.
+   
+```{r cat1_one_model,predict, message = FALSE, warning = FALSE}
+model_lg_one = glm(survival~.,data=training,family='binomial')
+summary(model_lg_one)
+
+pred_lg_one = predict(model_lg_one,newdata=testing,type='response')
+log.prediction <- ifelse(pred_lg_one > 0.5, 1, 0)
+
+
+compare<-table(log.prediction, testing$survival)
+compare
+accuracy_lg_one<-sum(diag(compare))/sum(compare)
+accuracy_lg_one
+```
+
+
+#### Many Models
+&nbsp;
+&nbsp;
+&nbsp;
+
+1. Apply the same formula for many models, follow the same steps as one model strategy, the function could be iterated through subgroups
+
+2. Because the total observations aggregated from subgroups is the same with observations in training and testing sets, we could directly concatenate all the values 
+   and compare prediction with actual values to calculate the accuracy. 
+
+```{r cat1_many_model,message = FALSE, warning = FALSE}
+#group1 
+model_lg_many.1 = glm(survival~.,data=training.1,family='binomial')
+pred_lg_many.1 = predict(model_lg_many.1,newdata=testing.1,type='response')
+log.prediction_many.1 <- ifelse(pred_lg_many.1 > 0.5, 1, 0)
+
+#group2
+model_lg_many.2 = glm(survival~.,data=training.2,family='binomial')
+pred_lg_many.2 = predict(model_lg_many.2,newdata=testing.2,type='response')
+log.prediction_many.2 <- ifelse(pred_lg_many.2 > 0.5, 1, 0)
+
+#group3
+model_lg_many.3 = glm(survival~.,data=training.3,family='binomial')
+pred_lg_many.3 = predict(model_lg_many.3,newdata=testing.3,type='response')
+log.prediction_many.3 <- ifelse(pred_lg_many.3 > 0.5, 1, 0)
+
+#group4
+model_lg_many.4 = glm(survival~.,data=training.4,family='binomial')
+pred_lg_many.4 = predict(model_lg_many.4,newdata=testing.4,type='response')
+log.prediction_many.4 <- ifelse(pred_lg_many.4 > 0.5, 1, 0)
+
+#group5
+model_lg_many.5 = glm(survival~.,data=training.5,family='binomial')
+pred_lg_many.5 = predict(model_lg_many.5,newdata=testing.5,type='response')
+log.prediction_many.5 <- ifelse(pred_lg_many.5 > 0.5, 1, 0)
+
+# calculate the accuracy 
+
+log.prediction_many <- c(log.prediction_many.1,log.prediction_many.2,
+   log.prediction_many.3,log.prediction_many.4,log.prediction_many.5)
+
+compare_many<-table(log.prediction_many, testing$survival)
+accuracy_lg_many<-sum(diag(compare_many))/sum(compare_many)
+accuracy_lg_many
+
+score_chart_1<-data.frame(model=c("logistic.model_one","logistic.model_many"),score=c(round(accuracy_lg_one,digits=3),round(accuracy_lg_many,digits = 3)))
+score_chart_1
+```
+
+&nbsp;
+&nbsp;
+&nbsp;
+
+##### Advantages
+&nbsp;
+&nbsp;
+
++ Logistic Regression is one of the simplest machine learning algorithms and is easy to implement yet provides great training efficiency in some cases, training 
+  a model with this algorithm doesn't require high computation power.
+  
++ The predicted parameters (trained weights) give inference about the importance of each feature, we can use logistic regression to find out the relationship between
+  the features.
+  
++ This algorithm allows models to be updated easily to reflect new data, the update can be done using stochastic gradient descent.
+
++ Logistic Regression outputs well-calibrated probabilities along with classification results, we can get an inference about which training examples are more accurate 
+  for the formulated problem.
+
++ Logistic Regression proves to be very efficient when the dataset has features that are linearly separable.
+
+&nbsp;
+&nbsp;
+&nbsp;
+
+##### Disadvantages
+&nbsp;
+&nbsp;
+
++ Logistic Regression is a statistical analysis model that attempts to predict precise probabilistic outcomes based on independent features. On high dimensional 
+  datasets, this may lead to the model being over-fit on the training set, which means overstating the accuracy of predictions on the training set and thus the model 
+  may not be able to predict accurate results on the test set. 
+  
++ It is difficult to capture complex relationships using logistic regression. 
+
++ The training features are known as independent variables. Logistic Regression requires moderate or no multicollinearity between independent variables. This means.
+  if two independent variables have a high correlation, only one of them should be used. Repetition of information could lead to wrong training of parameters 
+  during minimizing the cost function. Multicollinearity can be removed using dimensionality reduction techniques.
+  
++ This algorithm is sensitive to outliers.
+
+&nbsp;
+&nbsp;
+&nbsp;
+
+
+### Category 2: Decision Tree (Classification Tree Complex){.tabset}
+
+#### One Model
+
+&nbsp;
+&nbsp;
+&nbsp;
+
+A decision tree is a decision support tool that uses a tree-like graph or model of decisions and their possible consequences, including chance event outcomes, resource costs, and utility. It is one way to display an algorithm that only contains conditional control statements.Tree based learning algorithms are considered to be one of the best and mostly used supervised learning methods. Tree based methods empower predictive models with high accuracy, stability and ease of interpretation. Decision trees' 
+structure is flowchart-like, each internal node in it represents a “test” on an attribute (e.g. whether a coin flip comes up heads or tails), each branch represents the outcome of the test, and each leaf node represents a class label (decision taken after computing all attributes). The paths from root to leaf represent classification rules.
+
+&nbsp;
+
+1. Use rpart package to apply to decision tree model, method="class" to set the classification model.
+
+   + The syntax below in the chunk fits a CART model to automatically grow and prune the tree using the internal cross-validation procedure. 
+       
+   + The complexity parameter (Cp) is used to control the size of the decision tree and to select the optimal tree size, tree construction does not continue unless        
+     it would decrease the overall lack of fit by a factor of cp. 
+     
+   + This syntax help the tree model tune the Cp parameter automatically, according to the output table and the plot blow, 0.01 is the optimal value of the Cp in 
+     one model strategy.
+     
+   + The output of the model shows that the number of trees growed when training is 69989.
+   
+   + The output also shows the split variable/value, along with how many samples were partitioned into the branch.
+   
+   + The majority class is also printed and the predicted class probabilities for samples that terminate in this node.
+   
+   + For categorical predictors, a set of binary dummy variables is created that decomposes the categories to independent bits of information, each of these dummy 
+     variables is then included separately in the model. Tree models can also bin categorical predictors, so evaluating purity for each of these new predictors is even
+     easier, since each predictor has exactly one split point.
+     
+2. Predict on the testing data set
+
+   + The predict(object, type = "class") generates a factor vector of the survive event.
+   
+   + With this syntax, we don't need to binarize the predicted probability values to get the actual predictions with ifelse() function.
+
+3. Compare the predictions generated from the classification tree model with the testing data set.
+
+   + The accuracy would be the proportion of number of observations which predicting outputs equal to the actual values among all the testing data set.
+   
+
+```{r cat2_one_model,predict,message = FALSE, warning = FALSE}
+#fit model
+model_dTree_one  = rpart(survival~.,data=training,method='class')
+model_dTree_one
+plot(model_dTree_one)
+text(model_dTree_one, pretty=2)
+printcp(model_dTree_one)
+plotcp(model_dTree_one)
+
+#predict 
+pred_dTree_one = predict(model_dTree_one, newdata=testing,type = 'class')
+
+
+#calculate accuracy 
+compare<-table(pred_dTree_one, testing$survival)
+accuracy_dTree_one<-sum(diag(compare))/sum(compare)
+accuracy_dTree_one
+```
+
+
+#### Many Models
+
+&nbsp;
+&nbsp;
+&nbsp;
+
+1. Apply the same formula for many models, follow the same steps as one model strategy.
+
+2. Choose the optimal cp value with the same approach as the one model strategy.
+   According to the output tables and plots below, we find the optimal cp value :
+   
+   + for group1 is 0.011
+   + for group2 is 0.013
+   + for group3 is 0.020
+   + for group4 is 0.012
+   + for group5 is 0.012
+
+3. Because the total observations aggregated from subgroups is the same with observations in training and testing sets, we could directly 
+   concatenate all the values and compare prediction with actual values to calculate the accuracy.
+
+
+```{r cat2_many_model_tuning,predict,message = FALSE, warning = FALSE}
+#tuning parameter cp for group 1 
+tree.1 = rpart(survival~.,data=training.1,method='class')
+plot(tree.1)
+text(tree.1)
+printcp(tree.1)
+plotcp(tree.1)
+
+#tuning parameter cp for group 2
+tree.2 = rpart(survival~.,data=training.2,method='class')
+plot(tree.2)
+text(tree.2)
+printcp(tree.2)
+plotcp(tree.2)
+
+#tuning parameter cp for group 3 
+tree.3 = rpart(survival~.,data=training.3,method='class')
+plot(tree.3)
+text(tree.3)
+printcp(tree.3)
+plotcp(tree.3)
+
+#tuning parameter cp for group 4 
+tree.4 = rpart(survival~.,data=training.4,method='class')
+plot(tree.4)
+text(tree.4)
+printcp(tree.4)
+plotcp(tree.4)
+
+#tuning parameter cp for group 5 
+tree.5 = rpart(survival~.,data=training.5,method='class')
+plot(tree.5)
+text(tree.5)
+printcp(tree.5)
+plotcp(tree.5)
+```
+ &nbsp;
+ 
+##### set optimal cp value for each model 
+
+   + for group1 is 0.011
+   + for group2 is 0.013
+   + for group3 is 0.020
+   + for group4 is 0.012
+   + for group5 is 0.012
+   
+&nbsp;
+
+```{r cat2_many_models,message = FALSE, warning = FALSE}
+#group1
+model_dTree_many.1  = rpart(survival~.,data=training.1,method='class',cp=0.011)
+pred_dTree_many.1 = predict(model_dTree_many.1, newdata=testing.1,type = 'class')
+
+#group2
+model_dTree_many.2  = rpart(survival~.,data=training.2,method='class',cp=0.013)
+pred_dTree_many.2 = predict(model_dTree_many.2, newdata=testing.2,type = 'class')
+
+#group3
+model_dTree_many.3  = rpart(survival~.,data=training.3,method='class',cp=0.020)
+pred_dTree_many.3 = predict(model_dTree_many.3, newdata=testing.3,type = 'class')
+
+#group4
+model_dTree_many.4  = rpart(survival~.,data=training.4,method='class',cp=0.012)
+pred_dTree_many.4 = predict(model_dTree_many.4, newdata=testing.4,type = 'class')
+
+#group5
+model_dTree_many.5  = rpart(survival~.,data=training.5,method='class',cp=0.012)
+pred_dTree_many.5 = predict(model_dTree_many.5, newdata=testing.5,type = 'class')
+
+# predict 
+pred_dTree_many <- c(pred_dTree_many.1 ,pred_dTree_many.2,
+   pred_dTree_many.3,pred_dTree_many.4 ,pred_dTree_many.5 )
+
+#calculate accuracy 
+compare_many<-table(pred_dTree_many, testing$survival)
+accuracy_dTree_many<-sum(diag(compare_many))/sum(compare_many)
+accuracy_dTree_many
+
+score_chart_2<-data.frame(model=c("dTree.model_one","dTree.model_many"),score=c(round(accuracy_dTree_one,digits=3),round(accuracy_dTree_many,digits = 3)))
+
+score_chart_2
+```
+&nbsp;
+&nbsp;
+&nbsp;
+
+##### Advantages
+&nbsp;
+&nbsp;
+
++ Compared to other algorithms decision trees requires less effort for data preparation during pre-processing.
+
++ Less data cleaning required 
+
+  + A decision tree does not require normalization of data, and scaling of data.
+  + Missing values in the data also does NOT affect the process of building decision tree to any considerable extent.
+
++ Useful in Data exploration: Decision tree is one of the fastest way to identify most significant variables and relation between two or more variables. 
+  With the help of decision trees, we can create new variables / features that has better power to predict target variable. 
+  
++ Non-linear relationships between parameters do not affect tree performance.
+
++ The number of hyper-parameters to be tuned is almost null.
+
+
+&nbsp;
+&nbsp;
+&nbsp;
+
+##### Disadvantages 
+&nbsp;
+&nbsp;
+
++ Over fitting is one of the most practical difficulty for decision tree models. This problem gets solved by setting constraints on model parameters and pruning.
+
++ While working with continuous numerical variables, decision tree loses information, when it categorizes variables in different categories.
+
++ Decision trees can be unstable because small variations in the data might result in a completely different tree being generated. 
+  
+  + variance needs to be lowered by methods like bagging and boosting. 
+
++ Low prediction accuracy for a dataset as compared to other machine learning algorithms.
+
++ Calculations can become complex when there are many class label.
+
+&nbsp;
+&nbsp;
+&nbsp;
+
+
+### Category 3:  Random Forest {.tabset}
+
+#### One Model
+
+&nbsp;
+&nbsp;
+&nbsp;
+
+RF classifier is an ensemble method that trains several decision trees in parallel with bootstrapping followed by aggregation, jointly referred as bagging. Bootstrapping indicates that several individual decision trees are trained in parallel on various subsets of the training data set using different subsets of available features. Bootstrapping ensures that each individual decision tree in the random forest is unique, which reduces the overall variance of the RF classifier. For the final decision, RF classifier aggregates the decisions of individual trees; consequently, RF classifier exhibits good generalization.
+
+&nbsp;
+
+1. Use ranger to apply random forest model, which requires ranger package
+
+2. Predict on the testing data set
+
+   + glm does not predict the survive, but can produce the probability of the event by setting type = “response”.
+
+   + Binarize the predicted probability values to get the actual predictions with ifelse() function.
+
+3. Compare the predictions generated from the classification tree model with the testing data set.
+
+   + the accuracy would be the proportion of number of observations which predicting outputs equal to the actual values among all the testing data set.
+
+
+```{r cat3_one_model, eval=FALSE, message = FALSE, warning = FALSE}
+# tune parameters
+
+mtry = floor(132/3)
+mtry
+
+# define hyper parameter grid search 
+
+hyper_grid <- expand.grid(
+  mtry       = seq(36, 46, by = 2),
+  node_size  = seq(3, 9, by = 2),
+  num.trees  = 500,
+  OOB_RMSE   = 0)
+
+
+# loop 
+for(i in 1:nrow(hyper_grid)) {
+    model <- ranger(
+    formula         = survival ~ ., 
+    data            = training, 
+    mtry            = hyper_grid$mtry[i],
+    min.node.size   = hyper_grid$node_size[i],
+    seed            = 35)
+
+    hyper_grid$OOB_RMSE[i] <- sqrt(model$prediction.error)
+}
+
+```
+
+```{r cat3_one_model pred,message = FALSE, warning = FALSE}
+#fit model
+model_rf_one = ranger(survival ~ ., data = training)
+#predict 
+pred_rf_one = predict(model_rf_one, data = testing)
+rf.prediction <- ifelse(pred_rf_one$predictions > 0.5, 1, 0)
+#compare
+compare<-table(rf.prediction, testing$survival)
+accuracy_rf_one<-sum(diag(compare))/sum(compare)
+accuracy_rf_one
+```
+&nbsp;
+&nbsp;
+&nbsp;
+
+
+#### Many Models
+
+&nbsp;
+&nbsp;
+&nbsp;
+
+1. Apply the same formula for many models, follow the same steps as one model strategy.
+
+2. Because the total observations aggregated from subgroups is the same with observations in training and testing sets, we could directly concatenate all the values 
+   and compare prediction with actual values to calculate the accuracy.
+
+```{r cat3_many_models, message = FALSE, warning = FALSE}
+#group1
+model_rf_many.1 = ranger(survival ~ ., data = training.1)
+pred_rf_many.1 = predict(model_rf_many.1, data = testing.1)
+rf.prediction.1 <- ifelse(pred_rf_many.1$predictions > 0.5, 1, 0)
+
+#group2
+model_rf_many.2 = ranger(survival ~ ., data = training.2)
+pred_rf_many.2 = predict(model_rf_many.2, data = testing.2)
+rf.prediction.2 <- ifelse(pred_rf_many.2$predictions > 0.5, 1, 0)
+
+#group3
+model_rf_many.3 = ranger(survival ~ ., data = training.3)
+pred_rf_many.3 = predict(model_rf_many.3, data = testing.3)
+rf.prediction.3 <- ifelse(pred_rf_many.3$predictions > 0.5, 1, 0)
+
+#group4
+model_rf_many.4 = ranger(survival ~ ., data = training.4)
+pred_rf_many.4 = predict(model_rf_many.4, data = testing.4)
+rf.prediction.4 <- ifelse(pred_rf_many.4$predictions > 0.5, 1, 0)
+
+#group5
+model_rf_many.5 = ranger(survival ~ ., data = training.5)
+pred_rf_many.5 = predict(model_rf_many.5, data = testing.5)
+rf.prediction.5 <- ifelse(pred_rf_many.5$predictions > 0.5, 1, 0)
+
+# prediction 
+rf.prediction_many <- c(rf.prediction.1,rf.prediction.2,
+                        rf.prediction.3,rf.prediction.4,rf.prediction.5)
+
+# accuracy
+
+rf_compare_many<-table(rf.prediction_many, testing$survival)  
+accuracy_rf_many<-sum(diag(rf_compare_many))/sum(rf_compare_many)
+accuracy_rf_many
+
+score_chart_3<-data.frame(model=c("rf.model_one","rf.model_many"),score=c(round(accuracy_rf_one,digits=3),round(accuracy_rf_many,digits =3)))
+score_chart_3
+
+```
+
+&nbsp;
+&nbsp;
+&nbsp;
+
+##### Advantages
+&nbsp;
+&nbsp;
+
++ Random Forest is based on the bagging algorithm and uses Ensemble Learning technique. It creates as many trees on the subset of the data and combines the output 
+   of all the trees. In this way it reduces overfitting problem in decision trees and also reduces the variance and therefore improves the accuracy.
+
++ Random Forest works well with both categorical and continuous variables.
+
++ Less data cleaning work:
+
+   + Random Forest can automatically handle missing values.
+
+   + No feature scaling required: No feature scaling (standardization and normalization) required in case of Random Forest as it uses rule based 
+     approach instead of distance calculation.
+
++ Handles non-linear parameters efficiently: Non linear parameters don't affect the performance of a Random Forest unlike curve based algorithms. 
+
+
++ Random Forest is usually robust to outliers and can handle them automatically and is comparatively less impacted by noise.
+
++ Random Forest algorithm is very stable. Even if a new data point is introduced in the dataset, the overall algorithm is not affected much since the 
+   new data may impact one tree, but it is very hard for it to impact all the trees.
+
+
+&nbsp;
+&nbsp;
+&nbsp;
+
+##### Disadvantages 
+&nbsp;
+&nbsp;
+
+
++ Complexity: Random Forest creates a lot of trees and combines their outputs, this algorithm requires much more computational power and resources. 
+
++ Longer Training Period: Random Forest require much more time to train as compared to decision trees as it generates a lot of trees.
+
+&nbsp;
+&nbsp;
+&nbsp;
+
+
+ 
+### Category 4:  KNN {.tabset}
+
+#### One Model
+
+&nbsp;
+&nbsp;
+&nbsp;
+
+K-nearest neighbors (KNN) algorithm is a type of supervised ML algorithm which can be used for both classification as well as regression predictive problems. However, it is mainly used for classification predictive problems. K-nearest neighbors (KNN) algorithm uses ‘feature similarity’ to predict the values of new datapoints which further means that the new data point will be assigned a value based on how closely it matches the points in the training set.
+
+1. Feature scaling, data normalization to avoid this miss classification, if we don't do so, KNN may generate wrong predictions.
+
+   + Define normalization function and apply to train/test subgroups.
+   
+   + For classification algorithms like KNN, we measure the distances between pairs of samples and these distances are influenced by the measurement units.
+   
+   + Any algorithm where distance play a vital role for prediction or classification, we should normalize the variable as we do the same process in PCA.
+   
+2. Impute missing value manually with data table. KNN is sensitive to noisy data, and test if there is missing values in normalized datsets.
+
+3. Calculate optimal k value for the model with sqrt(nrow(training))
+
+   + K value should be odd
+   
+   + K value must not be multiples of the number of classes
+   
+   + Should not be too small or too large
+   
+4. Fit the model with optimal k value and calculate the accuracy with pre defined accuracy calculating function.
+
+
+```{r cat4_one_model,data_normalization,message = FALSE, warning = FALSE}
+
+##the normalization function is created
+nor <-function(x) { (x -min(x))/(max(x)-min(x)) }
+
+## knn accuracy
+knn_accuracy <- function(x){sum(diag(x)/(sum(rowSums(x)))) * 100}
+
+# Normalize Training Data and impute missing values
+training_norm <- as.data.frame(lapply(training[,c(2:7,9:132)], nor))
+training_norm<-cbind(training_norm,training[,8])      
+
+training_norm.1 <- as.data.frame(lapply(training.1[,c(2:6,8:131)], nor))
+training_norm.1<-cbind(training_norm.1,training.1[,7]) 
+
+training_norm.2 <- as.data.frame(lapply(training.2[,c(2:6,8:131)], nor))
+training_norm.2<-cbind(training_norm.2,training.2[,c(7)]) 
+
+training_norm.3 <- as.data.frame(lapply(training.3[,c(2:6,8:85,87:131)], nor))
+training_norm.3<-cbind(training_norm.3,training.3[,c(7,86)]) 
+
+training_norm.4 <- as.data.frame(lapply(training.4[,c(2:6,8:85,87:131)], nor))
+training_norm.4<-cbind(training_norm.4,training.4[,c(7,86)]) 
+
+training_norm.5 <- as.data.frame(lapply(training.5[,c(2:6,8:85,87:131)], nor))
+training_norm.5<-cbind(training_norm.5,training.5[,c(7,86)]) 
+
+# Normalize Testing Data and impute missing values
+testing_norm <- as.data.frame(lapply(testing[,c(2:7,9:132)], nor))
+testing_norm<-cbind(testing_norm,testing[,8])   
+
+testing_norm.1 <- as.data.frame(lapply(testing.1[,c(2:6,8:131)], nor))
+testing_norm.1<-cbind(testing_norm.1,testing.1[,7]) 
+
+testing_norm.2 <- as.data.frame(lapply(testing.2[,c(2:6,8:131)], nor))
+testing_norm.2<-cbind(testing_norm.2,testing.2[,c(7)]) 
+
+testing_norm.3 <- as.data.frame(lapply(testing.3[,c(2:6,8:85,87:131)], nor))
+testing_norm.3<-cbind(testing_norm.3,testing.3[,c(7,86)]) 
+
+testing_norm.4 <- as.data.frame(lapply(testing.4[,c(2:6,8:85,87:131)], nor))
+testing_norm.4<-cbind(testing_norm.4,testing.4[,c(7,86)]) 
+
+testing_norm.5 <- as.data.frame(lapply(testing.5[,c(2:6,8:85,87:131)], nor))
+testing_norm.5<-cbind(testing_norm.5,testing.5[,c(7,86)]) 
+
+# test noise 
+sum(is.na(training_norm.1))
+sum(is.na(testing_norm.1))
+sum(is.na(training_norm.2))
+sum(is.na(testing_norm.2))
+sum(is.na(training_norm.3))
+sum(is.na(testing_norm.3))
+sum(is.na(training_norm.4))
+sum(is.na(testing_norm.4))
+sum(is.na(training_norm.5))
+sum(is.na(testing_norm.5))
+
+```
+
+```{r cat4_one_model_k, message = FALSE, warning = FALSE}
+k_one =sqrt(nrow(training_norm))
+k_one
+
+k_many.1=sqrt(nrow(training_norm.1))
+k_many.1
+
+k_many.2=sqrt(nrow(training_norm.2))
+k_many.2
+
+k_many.3=sqrt(nrow(training_norm.3))
+k_many.3
+
+k_many.4=sqrt(nrow(training_norm.4))
+k_many.4
+
+k_many.5=sqrt(nrow(training_norm.5))
+k_many.5
+
+```
+
+```{r cat4_one_model, message = FALSE, warning = FALSE}
+# fit model
+model_knn_one = knn(training_norm,testing_norm,cl=training$survival,k=265) 
+
+# accuracy
+compare_knn_one <- table(model_knn_one,testing$survival)
+accuracy <- function(x){sum(diag(x)/(sum(rowSums(x))))}
+accuracy_knn_one<-accuracy(compare_knn_one)
+accuracy_knn_one
+```
+
+
+#### Many Models
+
+
+&nbsp;
+&nbsp;
+&nbsp;
+
+1. Apply the same formula for many models, follow the same steps as one model strategy.
+
+2. Because the total observations aggregated from subgroups is the same with observations in training and testing sets, we could directly concatenate all the values 
+   and compare prediction with actual values to calculate the accuracy.
+
+```{r cat4_many_models,message = FALSE, warning = FALSE}
+#group 1
+model_knn_many.1 = knn(training_norm.1,testing_norm.1,cl=training.1$survival,k=61) 
+#group 2
+model_knn_many.2 = knn(training_norm.2,testing_norm.2,cl=training.2$survival,k=57) 
+#group 3
+model_knn_many.3 = knn(training_norm.3,testing_norm.3,cl=training.3$survival,k=63) 
+#group 4
+model_knn_many.4 = knn(training_norm.4,testing_norm.4,cl=training.4$survival,k=63) 
+#group 5
+model_knn_many.5 = knn(training_norm.5,testing_norm.5,cl=training.5$survival,k=53) 
+
+# concatenate predictions  
+model_knn_many<-c(model_knn_many.1 ,model_knn_many.2,model_knn_many.3,model_knn_many.4,model_knn_many.5)
+
+# calculate accuracy
+compare_knn_many <- table(model_knn_many,testing$survival)
+accuracy <- function(x){sum(diag(x)/(sum(rowSums(x))))}
+accuracy_knn_many<-accuracy(compare_knn_many)
+
+accuracy_knn_many
+
+# generate score chart
+score_chart_4<-data.frame(model=c("knn.model_one","knn.model_many"),score=c(round(accuracy_knn_one,digits=3),round(accuracy_knn_many,digits =3)))
+score_chart_4
+
+```
+
+&nbsp;
+&nbsp;
+&nbsp;
+
+##### Advantages
+&nbsp;
+&nbsp;
+
++ No Training Period: KNN is called Lazy Learner (Instance based learning). It does not derive any discriminative  function from the training data. It stores the 
+  training dataset and learns from it only at the time of making real time predictions, which makes the KNN algorithm much faster than other algorithms.
+
++ Since the KNN algorithm requires no training before making predictions, new data can be added seamlessly which will not impact the accuracy of the algorithm.
+
++ KNN is very easy to implement. There are only two parameters required to implement KNN 
+
+  + the value of K and 
+  + the distance function (e.g. Euclidean or Manhattan etc.)
+
+
+&nbsp;
+&nbsp;
+&nbsp;
+
+##### Disadvantages 
+&nbsp;
+&nbsp;
+
++  Does not work well with large dataset: In large datasets, the cost of calculating the distance between the new point and each existing points 
+   is huge which degrades the performance of the algorithm.
+
++  Does not work well with high dimensions: The KNN algorithm doesn't work well with high dimensional data because with large number of dimensions, 
+   it becomes difficult for the algorithm to calculate the distance in each dimension.
+
++  Need feature scaling: We need to do feature scaling (standardization and normalization) before applying KNN algorithm to any dataset. 
+   If we don't do so, KNN may generate wrong predictions.
+
++  Sensitive to noisy data, missing values and outliers: KNN is sensitive to noise in the dataset. We need to manually impute missing values and remove outliers.
+
+
+&nbsp;
+&nbsp;
+
+
+
+
+### Category 5:  Boosted Regression Tree {.tabset}
+
+#### One Model
+
+&nbsp;
+&nbsp;
+&nbsp;
+
+Boosted Regression Tree (BRT) models are a combination of two techniques: decision tree algorithms and boosting methods. Like Random Forest models, BRTs repeatedly fit many decision trees to improve the accuracy of the model.GBMs build an ensemble of shallow and weak successive trees with each tree learning and improving on the previous. When combined, these many weak successive trees produce a powerful “committee” that are often hard to beat with other algorithms. 
+
+&nbsp;
+
+1. gbm function - Fits a gbm model to one or more response variables, using cross-validation to estimate the optimal number of trees. 
+   + train function is used to tune over parameters
+
+
+2. Predict on the testing data set
+
+   + gbm does not predict the survive, but can produce the probability of the event by setting type = “response”.
+
+   + Binarize the predicted probability values to get the actual predictions with ifelse() function.
+
+3. Compare the predictions generated from the GBM model with the testing data set.
+
+   + the accuracy would be the proportion of number of observations which predicting outputs equal to the actual values among all the testing data set.
+   
+
+```{r cat5_one_model_tune, eval=FALSE, message = FALSE, warning = FALSE}
+
+#this creates the tuning grid, ensure you name the features the same as the hyper parameters. Hyperparameters are essentially the 'settings' of the algorithm
+grid <- expand.grid(n.trees = seq(500,1500,by =500), interaction.depth=c(1:3), shrinkage=c(0.001,0.05,0.1), n.minobsinnode=c(20))
+
+#This creates the train control. in this example I am using a repeated k-folds cross validation with k= 5 repeated 2 times, allowing parallel.
+ctrl <- trainControl(method = "repeatedcv",number = 5, repeats = 2, allowParallel = T)
+
+#Register parallel cores
+registerDoParallel(detectCores()-1)
+
+#build model
+tune<-capture.output(model_tune<-train(survival ~ ., data = training,method = "gbm", trControl = ctrl, tuneGrid = grid))
+ 
+```
+
+
+
+```{r cat5_one_model,message = FALSE, warning = FALSE}
+#fit the model
+model_gbm_one = gbm(training$survival ~ ., data = training, distribution = "bernoulli", 
+                    interaction.depth = 1, n.trees = 500,shrinkage = 0.001,verbose=FALSE) 
+#predict
+pred_gbm_one = predict(model_gbm_one,newdata = testing,type="response",ntrees=500)
+gbm.prediction <- ifelse(pred_gbm_one > 0.5, 1, 0)
+compare<-table(gbm.prediction, testing$survival)
+accuracy_gbm_one<-sum(diag(compare))/sum(compare)
+accuracy_gbm_one
+
+```
+
+
+#### Many Models
+
+&nbsp;
+&nbsp;
+&nbsp;
+
+1. Apply the same formula for many models, follow the same steps as one model strategy.
+
+2. Because the total observations aggregated from subgroups is the same with observations in training and testing sets, we could directly concatenate all the values 
+   and compare prediction with actual values to calculate the accuracy.
+
+```{r cat5_many_models, message = FALSE, warning = FALSE}
+#group1
+model_gbm_many.1 = gbm(survival ~ ., data = training.1, distribution = "bernoulli",interaction.depth = 1, n.trees = 500,shrinkage = 0.001,verbose=FALSE) 
+pred_gbm_many.1 = predict(model_gbm_many.1 ,newdata = testing.1,type="response",ntrees=500)
+gbm.prediction.1 <- ifelse(pred_gbm_many.1> 0.5, 1, 0)
+
+#group2
+model_gbm_many.2 = gbm(survival ~ ., data = training.2, distribution = "bernoulli",interaction.depth = 1, n.trees = 500,shrinkage = 0.001,verbose=FALSE) 
+pred_gbm_many.2 = predict(model_gbm_many.2 ,newdata = testing.2,type="response",ntrees=500)
+gbm.prediction.2 <- ifelse(pred_gbm_many.2> 0.5, 1, 0)
+
+
+#group3
+model_gbm_many.3 = gbm(survival ~ ., data = training.3, distribution = "bernoulli",interaction.depth = 1, n.trees = 500,shrinkage = 0.001,verbose=FALSE) 
+pred_gbm_many.3 = predict(model_gbm_many.3 ,newdata = testing.3,type="response",ntrees=500)
+gbm.prediction.3 <- ifelse(pred_gbm_many.3> 0.5, 1, 0)
+
+
+#group4
+model_gbm_many.4 = gbm(survival ~ ., data = training.4, distribution = "bernoulli",interaction.depth = 1, n.trees = 500,shrinkage = 0.001,verbose=FALSE) 
+pred_gbm_many.4 = predict(model_gbm_many.4 ,newdata = testing.4,type="response",ntrees=500)
+gbm.prediction.4 <- ifelse(pred_gbm_many.4> 0.5, 1, 0)
+
+
+#group5
+model_gbm_many.5 = gbm(survival ~ ., data = training.5, distribution = "bernoulli",interaction.depth = 1, n.trees = 500,shrinkage = 0.01,verbose=FALSE) 
+pred_gbm_many.5 = predict(model_gbm_many.5 ,newdata = testing.5,type="response",ntrees=500)
+gbm.prediction.5 <- ifelse(pred_gbm_many.5> 0.5, 1, 0)
+
+# predict 
+gbm.prediction_many <- c(gbm.prediction.1,gbm.prediction.2,
+                        gbm.prediction.3,gbm.prediction.4,gbm.prediction.5)
+# accuracy
+gbm_compare_many<-table(gbm.prediction_many, testing$survival)
+accuracy_gbm_many<-sum(diag(gbm_compare_many))/sum(gbm_compare_many)
+accuracy_gbm_many
+
+score_chart_5<-data.frame(model=c("gbm.model_one","gbm.model_many"),score=c(round(accuracy_gbm_one,digits=3),round(accuracy_gbm_many,digits =3)))
+
+```
+&nbsp;
+&nbsp;
+
+##### Advantages
+&nbsp;
+&nbsp;
+
++ Can be used with a variety of response types (binomial, gaussian, poisson)
+
++ Often provides predictive accuracy that cannot be beat.
+
++ Lots of flexibility - can optimize on different loss functions and provides several hyperparameter tuning options that make the function fit very flexible.
+
++ Less data cleaning work
+  + No data pre-processing required - often works great with categorical and numerical values as is. 
+  + Handles missing data - imputation not required.
+
+
+&nbsp;
+&nbsp;
+
+##### Disadvantages 
+&nbsp;
+&nbsp;
+
++  GBMs will continue improving to minimize all errors. This can overemphasize outliers and cause overfitting. Must use cross-validation to neutralize.
+
++  Computationally expensive - GBMs often require many trees (>1000) which can be time and memory exhaustive.
+
++  The high flexibility results in many parameters that interact and influence heavily the behavior of the approach (number of iterations, tree depth, 
+   regularization parameters, etc.). This requires a large grid search during tuning.
+
+
+
+&nbsp;
+&nbsp;
+
+
+
+## Scoreboard
+
+&nbsp;
+&nbsp;
+
+1. Generate the score chart for accuracies of two strategies.
+
+2. The result shows that the accuracy of one model is higher than the accuracy of many models 
+
+```{r scoring,message = FALSE, warning = FALSE}
+scoreboard<-rbind(score_chart_1,score_chart_2,score_chart_3,score_chart_4,score_chart_5)
+scoreboard[order(scoreboard$score,decreasing = TRUE),]
+```
+
+
+&nbsp;
+&nbsp;
+
+## Discussion
+&nbsp;
+&nbsp;
+
+
+
++ Which model has the best performance ? Which one is the worst ?
+  
+  + The one model approach random forest has the best performance of predicting class labels, the accuracy rate is 0.93, the many model approach, logistic model has the        lowest accuracy rate. 
+  
+  + Random forest has the highest accuracy when solely fitting the overall data sample, but this model doesn't work as well when applied to subgroups. 
+    Also, one model approach, logistic regression has the second best performance, but it's the worst with many model approach.
+    The one model approach, decision tree rank the third, and its many approach model rank the 9th. 
+  
+  + To summarize, for classification tree models, they generate higher accuracy for the one model approach than other classification modeling methods, but their subgroups      aggregated accuracies are lower than that of knn and boosting. 
+  
+
++ How different were the results for the One Model and Many Model approaches? 
+
+  + According to the score chart above, we find that, of the five categories of models, one model approach generates better predictive performance than many model approach.
+    Applying the same model, the accuracy score of one model approach is approximately 0.04 higher than that of many models approach, except for knn and gradient boost         model, of which the accuracy difference between two two approaches is only 0.005. 
+  
+  + This is reasonable, because random forest is advantaged for generating high predicting performance, and decision trees are disadvantaged for generating lower accuracy      than other trees, also decision trees can be unstable because small variations in the data might result in a completely different tree being generated, which explains      why decision tree many model approach rank so low. 
+  
+  + KNN does not work well with large datasets, the cost of calculating the distance between the new point and each existing points is huge which degrades the 
+    performance of the algorithm. It also doesn't work well with high dimensions as well, high dimensions make the algorithm difficult to calculate the distance in each        dimension. This would explain why KNN doesn't perform as well on subgroup model (smaller sample size) when it's applied on the overall dataset. 
+    
+  +  Gradient Boosting can optimize on different loss functions and provides several hyperparameter tuning options that make the function fit very flexible, when all the        parameters are optimal, the performance difference between one model approach and many model approach is very small. 
+
+  + High dimensional datasets may lead to the model being over-fit on the training set and being sensitive to outliers explain why logistic regression rank the last for        many model approach. 
+ 
+  
+
++ How much did the sample size of the subgroups impact the results? Are you concerned about the possibility of fitting too many models? 
+
+  + The sample size of subgroups does impact the results, especially when applying models which require setting different parameters according to sample size. Such as KNN,
+    boosting, random forest, it is important to set the optimal parameters for different samples, in this way, the impact of sample size would be reduced to some extend.
+    
+  + If the sample size is too small, and the data dimensions are high. We generally want to minimize the bias and variance, the difference between observed value and 
+    the predicted value is called bias, variance is the difference in performance on training and testing datasets. Larger data size help model uncover the relationship        between predictors. KNN is highly influenced by the data size because more data help in making the model more consistent and accurate. Change the loss function, shuffle     the data (randomize distribution) to avoid imbalance would help mitigate the problem of too small data size. 
+    
+  + Not concern about fitting too many models because different models have different algorithms to uncover the data relationship, the set.seed () would also ensure 
+    the results of different models applied on the same data comparable. set.seed and shuffle training/testing data before applying different models would help. 
+
+
+&nbsp;
+&nbsp;
+
+## References
+
+&nbsp;
+&nbsp;
+
+1.https://stackoverflow.com/questions/11568897/value-of-k-in-k-nearest-neighbor-algorithm (accessed 8.13, 2020)
+2.https://towardsdatascience.com/3-things-you-need-to-know-before-you-train-test-split-869dfabb7e50 (accessed 8.13, 2020)
+3.https://www.analyticsvidhya.com/blog/2015/08/learning-concept-knn-algorithms-programming/ (accessed 8.15 2020)
+4.Max Kuhn, Kjell Johnson.(2016) Applied Predictive Modeling.5th ed.New York:Springer
+5.https://www.marsja.se/create-dummy-variables-in-r/ (accessed 8.14 2020)
+
+&nbsp;
+&nbsp;
